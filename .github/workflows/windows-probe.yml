@@ -1,0 +1,72 @@
+# Scratch workflow for the 0xull fork only. Never part of the upstream PR.
+name: windows-probe
+
+on:
+  push:
+    branches: [ windows-probe ]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: never
+
+jobs:
+  # The upstream test suite on the patch, including the 1.71 MSRV.
+  tests:
+    strategy:
+      fail-fast: false
+      matrix:
+        rust: [ stable, 1.71.0 ]
+        os: [ ubuntu-latest, macos-latest, windows-latest ]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.rust }}
+      - run: cargo test
+      - run: cargo test --release
+
+  # The header scenario on every compiler. The job fails if any row is wrong.
+  scenario:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: linux g++, os: ubuntu-latest, toolchain: stable, cxx: "", prefer_clang_cl: "" }
+          - { name: linux clang++, os: ubuntu-latest, toolchain: stable, cxx: clang++, prefer_clang_cl: "" }
+          - { name: macos clang, os: macos-latest, toolchain: stable, cxx: "", prefer_clang_cl: "" }
+          - { name: msvc cl.exe, os: windows-latest, toolchain: stable, cxx: "", prefer_clang_cl: "" }
+          - { name: msvc clang-cl from Visual Studio, os: windows-latest, toolchain: stable, cxx: "", prefer_clang_cl: "1" }
+          - { name: windows-gnu g++, os: windows-latest, toolchain: stable-x86_64-pc-windows-gnu, cxx: "", prefer_clang_cl: "" }
+    name: scenario (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.toolchain }}
+      - name: check-headers
+        shell: bash
+        run: |
+          if [ -n "${{ matrix.prefer_clang_cl }}" ]; then export CC_PREFER_CLANG_CL_OVER_MSVC=1; fi
+          out=$(bash ci-probe/check-headers.sh . patched ${{ matrix.cxx }} | tr -d '\r')
+          echo "$out"
+          status=0
+          while IFS= read -r expected; do
+            if ! grep -qxF -- "$expected" <<< "$out"; then
+              echo "::error::missing line: $expected"
+              status=1
+            fi
+          done <<'EOF'
+          start                      VALUES [1, 10, 100, 1000, 7]
+          no-op rebuilds             fresh fresh
+          edit nested header         VALUES [2, 10, 100, 1000, 7]
+          edit header outside crate  VALUES [2, 20, 100, 1000, 7]
+          edit Config::file source   VALUES [2, 20, 200, 1000, 7]
+          edit non-ASCII dir header  VALUES [2, 20, 200, 1000, 8]
+          edit #ifdef-ed header      fresh
+          no-op rebuild              fresh
+          edit src/lib.rs (control)  rerun
+          duplicate lines            0
+          EOF
+          exit $status
